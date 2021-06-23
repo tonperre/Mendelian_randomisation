@@ -1,0 +1,145 @@
+---
+title: "Assignment_precision_medicine"
+author: "Romain Guitton"
+date: "23/06/2021"
+output: html_document
+---
+
+In this markdown we will assess two hypothesis about Parkinson's Disease (PD).
+
+We will first use Mendelian Randomisation (MR) to assess whether some epidemiological factors could be associated with PD.
+
+```{r setup, include=FALSE}
+## loading libraries
+library(devtools)
+library(dplyr)
+library(ggplot2)
+library(TwoSampleMR)
+library(MRInstruments)
+library(stringr)
+```
+
+## Mendelian Randomisation with GWAS
+
+we will try to see whether MR can help us in supporting associations that have been discussed lately : cardiovascular risks (micro strokes in basal ganglia, high education, diets..)
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+## v_exposures is a set of exposures linked to SNPs (from GWAS)
+## 
+v_exposures = c('ukb-b-16139','ukb-b-8193','ukb-b-19953','ieu-b-40','ebi-a-GCST90000615','prot-a-2789','prot-a-2790','ukb-d-20552_2',
+                'ukb-a-301','ukb-a-302','ukb-a-303','finn-a-I9_CVD','ieu-b-110','finn-a-F5_PSYCH','ukb-b-8193','ukb-b-13348','ukb-b-16489','ukb-d-22601_23113399','ukb-b-7460','ukb-b-2909','ukb-b-5779')
+
+Get_MR <- function(v_exposures){
+  df_results_MR=data.frame()
+  for (exposure in v_exposures){
+    message(paste0('treating exposure: ',exposure))
+    snps_exposure = extract_instruments(outcomes=exposure)
+    snps_exposure_label = snps_exposure$exposure
+    
+    ## clumping the data
+    snps_exposure.clump = clump_data(snps_exposure)
+    
+    ## get common SNPs
+    outcome_data =  extract_outcome_data(snps = snps_exposure.clump$SNP, outcomes = 'finn-a-G6_PARKINSON', proxies=TRUE)
+    
+    ## harmonisation
+    tryCatch(expr = {
+      library(MRInstruments)
+      outcome_data.harm = harmonise_data(exposure_dat = snps_exposure.clump, outcome_dat = outcome_data)
+      harm_mr = mr(outcome_data.harm)
+      if(nrow(df_results_MR)==0) df_results_MR=harm_mr else df_results_MR=rbind(df_results_MR,harm_mr)
+      mr_heterogeneity(outcome_data.harm)
+      mr_pleiotropy_test(outcome_data.harm)
+      plot=mr_scatter_plot(harm_mr, outcome_data.harm)
+      
+    },
+    error=function(e){message(paste0('no data for: ',snps_exposure_label,'. Skippping.'))},
+    warning={},
+    finally = {message('next.')}
+    )
+}
+  
+  
+  return(df_results_MR)
+}
+
+df_MR_PD=Get_MR(v_exposures)
+
+```
+
+We'll now only keep the MR Egger and will correct pvalues for multiple comparisons
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+df_MR_PD %>% filter(method=='MR Egger') %>% mutate(pval.corr = p.adjust(pval, method = 'fdr'), pval.sign = ifelse(pval.corr<0.05,'*','')) 
+
+```
+
+Not surprisingly, MR could not find an association between an epidemiological exposure and PD outcome. This is not surprising as epidemiological factors are heavily discussed in the community (namely the treatments against parasites and exposure as a farmer) but also because MR -to my understanding- has a slightly different approach : from the SNPs that *at a population level* you're able to find related to the susceptibility to an exposure, you might have confounding factors as evident as cultural factors (as starting smoking with no 'predisposition' to addiction to tobacco). Another aspect to take in account, MR has been performed on EU population. This might weakens also a possible association.
+
+## Mendelian Randomisation with eQTL
+
+Now, PD has been linked to mitochondrial disease too, namely the electron chain transport. In order to analyse eQTL with MR, we downloaded the last dataset from GTEX, for frontal cortex, a popular organ to study PD ( as often when PD patients are dying this area shows some specificities to PD, without being the target of a deep neurodegeneration).
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+
+### eQTL
+data(gtex_eqtl)
+load_eqtl = read.csv(file = 'data/getx/Brain_Frontal_Cortex_BA9.v8.egenes.txt', sep='\t')
+head(gtex_eqtl)
+head(load_eqtl)
+
+
+load_eqtl=load_eqtl %>% mutate(tissue='BA9',
+                     gene_start=paste0(str_extract(gene_chr,'[0-9M]+'),':',gene_start),
+                     snp_position=paste0(str_extract(chr,'[0-9M]+'),':',variant_pos)) %>%
+  rename('SNP'=rs_id_dbSNP151_GRCh38p7,
+         'effect_allele'=ref,
+         'other_allele'=alt,
+         'pval'=pval_true_df,
+         'beta'=beta_shape1,
+         'se'=slope_se,
+         'n'=num_var)
+  
+mtpseudogenes= load_eqtl %>% filter(str_detect(gene_name,'^MT'))  %>% select(gene_name) %>% .[[1]]
+
+df_result_eqtl = data.frame()
+for (gene in mtpseudogenes){
+  library(MRInstruments)
+  library(TwoSampleMR)
+  
+  eqtl <- subset(load_eqtl, gene_name==gene)
+  eqtl_form <- format_gtex_eqtl(eqtl)
+  eqtl_out <- extract_outcome_data(snps = eqtl_form$SNP, outcomes = 'finn-a-G6_ALZHEIMER', proxies=TRUE)
+  tryCatch(expr = {
+    
+    # 
+    # eqtl_out <- extract_outcome_data(snps = eqtl_form$SNP, outcomes = 'finn-a-G6_ALZHEIMER', proxies=TRUE)
+    # 
+    harm2 <- harmonise_data(exposure_dat = eqtl_form, outcome_dat = eqtl_out)
+    # 
+    # 
+    harm2_mr <- mr(harm2)
+    harm2_mr
+    if(nrow(df_result_eqtl)==0) df_result_eqtl=harm2_mr else df_result_eqtl=rbind(df_result_eqtl,harm2_mr)
+    # 
+  },
+  error=function(e){message(paste0('no data for: ',gene,'. Skippping.'))},
+  warning={},
+  finally = {message('next.')}
+  )
+  
+  
+}  
+df_result_eqtl
+```
+
+We will again correct the pvalues.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+df_result_eqtl %>% mutate(pval.corr = p.adjust(pval, method = 'fdr'), pval.sign = ifelse(pval.corr<0.05,'*',''))
+```
+
+Again, this analysis did not permit to link nuclear mitochondrial pseudogenes and genes involved in mitochondrial proteins with PD.
+
+This is a complex project to achieve, as many factors are coming to play : post mortem interval, quality of the RNA (RIN), individual susceptibility..
